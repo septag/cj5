@@ -1,3 +1,10 @@
+// TODO:
+//      utf8 support for strings
+//      counter should not care for max_tokens
+//      better error handling
+//      hash name optimization ?
+//      writer? (do we need it?)
+//      DOM
 #pragma once
 
 #include <stdbool.h>    // bool
@@ -17,6 +24,13 @@ typedef enum cj5_token_type {
     CJ5_TOKEN_NULL
 } cj5_token_type;
 
+typedef enum cj5_token_number_type {
+    CJ5_TOKEN_NUMBER_UNKNOWN = 0,
+    CJ5_TOKEN_NUMBER_FLOAT,
+    CJ5_TOKEN_NUMBER_INT,
+    CJ5_TOKEN_NUMBER_HEX
+} cj5_token_number_type;
+
 typedef struct cj5_result {
     bool error;
     int error_line;
@@ -26,6 +40,10 @@ typedef struct cj5_result {
 
 typedef struct cj5_token {
     cj5_token_type type;
+    union {
+        cj5_token_number_type num_type;
+        uint32_t key_hash;
+    };
     int start;
     int end;
     int size;
@@ -69,6 +87,29 @@ static inline bool cj5__isnum(char ch)
 #    undef CJ5__ARCH_32BIT
 #    define CJ5__ARCH_32BIT 32
 #endif    //
+
+#define CJ5__FOURCC(_a, _b, _c, _d) \
+    (((uint32_t)(_a) | ((uint32_t)(_b) << 8) | ((uint32_t)(_c) << 16) | ((uint32_t)(_d) << 24)))
+
+static const uint32_t CJ5__NULL_FOURCC = CJ5__FOURCC('n', 'u', 'l', 'l');
+static const uint32_t CJ5__TRUE_FOURCC = CJ5__FOURCC('t', 'r', 'u', 'e');
+static const uint32_t CJ5__FALSE_FOURCC = CJ5__FOURCC('f', 'a', 'l', 's');
+
+#define CJ5__FNV1_32_INIT 0x811c9dc5
+#define CJ5__FNV1_32_PRIME 0x01000193
+static inline uint32_t cj5__hash_fnv32(const char* start, const char* end)
+{
+    const char* bp = start;
+    const char* be = end;    // start + len
+
+    uint32_t hval = CJ5__FNV1_32_INIT;
+    while (bp < be) {
+        hval ^= (uint32_t)*bp++;
+        hval *= CJ5__FNV1_32_PRIME;
+    }
+
+    return hval;
+}
 
 // https://github.com/lattera/glibc/blob/master/string/strlen.c
 static int cj5__strlen(const char* str)
@@ -134,10 +175,8 @@ static cj5_token* cj5__alloc_token(cj5__parser* parser, cj5_token* tokens, int m
         return NULL;
     }
 
-    cj5_token* token = &tokens[parser->next_id];
-    token->start = token->end = -1;
-    token->size = 0;
-    token->parent_id = -1;
+    cj5_token* token = &tokens[parser->next_id++];
+    *token = (cj5_token){ .start = -1, .end = -1, .parent_id = -1 };
     return token;
 }
 
@@ -176,15 +215,16 @@ static cj5_result cj5__parse_primitive(cj5__parser* parser, const char* json5, i
 found:
     if (tokens == NULL) {
         --parser->pos;
-        return (cj5_result) {0};
+        return (cj5_result){ 0 };
     }
     token = cj5__alloc_token(parser, tokens, max_tokens);
     if (token == NULL) {
         parser->pos = start;
-        return (cj5_result) {.error = true };   // out of memory
+        return (cj5_result){ .error = true };    // out of memory
     }
 
     cj5_token_type type;
+    cj5_token_number_type num_type = 0;
     if (keyname) {
         // JSON5: it is likely a key-name, validate and interpret as string
         for (int i = start; i < parser->pos; i++) {
@@ -195,26 +235,71 @@ found:
             if (cj5__isnum(json5[i])) {
                 if (i == start) {
                     parser->pos = start;
-                    return (cj5_result) {.error = true};    // invalid
+                    return (cj5_result){ .error = true };    // invalid
                 }
                 continue;
             }
 
             parser->pos = start;
-            return (cj5_result) {.error = true};    // invalid
+            return (cj5_result){ .error = true };    // invalid
         }
 
         type = CJ5_TOKEN_STRING;
+    } else {
+        // detect other types, subtypes
+        uint32_t* fourcc = (uint32_t*)&json5[start];
+        if (*fourcc == CJ5__NULL_FOURCC) {
+            type = CJ5_TOKEN_NULL;
+        } else if (*fourcc == CJ5__TRUE_FOURCC) {
+            type = CJ5_TOKEN_BOOL;
+        } else if (*fourcc == CJ5__FALSE_FOURCC) {
+            type = CJ5_TOKEN_BOOL;
+        } else {
+            num_type = CJ5_TOKEN_NUMBER_INT;
+            // hex number
+            if (json5[start] == '0' && start < parser->pos + 1 && json5[start + 1] == 'x') {
+                start = start + 2;
+                for (int i = start; i < parser->pos; i++) {
+                    if (!(cj5__isrange(json5[i], '0', '9') || cj5__isrange(json5[i], 'A', 'F') ||
+                          cj5__isrange(json5[i], 'a', 'f'))) {
+                        parser->pos = start;
+                        return (cj5_result){ .error = true };    // invalid
+                    }
+                }
+                num_type = CJ5_TOKEN_NUMBER_HEX;
+            } else {
+                int start_index = start;
+                if (json5[start] == '+' || json5[start + 1] == '-') {
+                    ++start_index;
+                }
+
+                for (int i = start_index; i < parser->pos; i++) {
+                    if (json5[i] == '.') {
+                        if (num_type == CJ5_TOKEN_NUMBER_FLOAT) {
+                            return (cj5_result){ .error = true };    // invalid
+                        }
+                        num_type = CJ5_TOKEN_NUMBER_FLOAT;
+                    }
+
+                    if (!cj5__isnum(json5[i])) {
+                        parser->pos = start;
+                        return (cj5_result){ .error = true };    // invalid
+                    }
+                }
+            }
+
+            type = CJ5_TOKEN_NUMBER;
+        }
     }
 
-    *token = (cj5_token) {
-        .type = type,
-        .start = start,
-        .end = parser->pos,
-        .parent_id = parser->super_id
-    };
+    token->type = type;
+    token->num_type =
+        (type == CJ5_TOKEN_STRING) ? cj5__hash_fnv32(&json5[start], &json5[parser->pos]) : num_type;
+    token->start = start;
+    token->end = parser->pos;
+    token->parent_id = parser->super_id;
     --parser->pos;
-    return (cj5_result) {0};
+    return (cj5_result){ 0 };
 }
 
 static cj5_result cj5__parse_string(cj5__parser* parser, const char* json5, int len,
@@ -235,7 +320,11 @@ static cj5_result cj5__parse_string(cj5__parser* parser, const char* json5, int 
             }
 
             token = cj5__alloc_token(parser, tokens, max_tokens);
+            token->type = CJ5_TOKEN_STRING;
+            token->start = start + 1;
+            token->end = parser->pos;
             token->parent_id = parser->super_id;
+
             return (cj5_result){ 0 };
         }
 
@@ -279,12 +368,23 @@ static cj5_result cj5__parse_string(cj5__parser* parser, const char* json5, int 
     return (cj5_result){ .error = true };    // incomplete
 }
 
-cj5_result cj5_parse(const char* json5, uint32_t len, cj5_token* tokens, int max_tokens)
+static void cj5__skip_comment(cj5__parser* parser, const char* json5, int len)
+{
+    for (; parser->pos < len; parser->pos++) {
+        if (json5[parser->pos] == '\n' || json5[parser->pos] == '\r') {
+            return;
+        }
+    }
+}
+
+cj5_result cj5_parse(const char* json5, int len, cj5_token* tokens, int max_tokens)
 {
     cj5__parser parser = { .super_id = -1 };
     cj5_result r = { 0 };
     cj5_token* token;
     int count = parser.next_id;
+    int line = 0;
+    bool can_comment = false;
 
     for (; parser.pos < len; parser.pos++) {
         char c;
@@ -294,6 +394,7 @@ cj5_result cj5_parse(const char* json5, uint32_t len, cj5_token* tokens, int max
         switch (c) {
         case '{':
         case '[':
+            can_comment = false;
             count++;
             if (tokens == NULL) {
                 break;
@@ -317,6 +418,7 @@ cj5_result cj5_parse(const char* json5, uint32_t len, cj5_token* tokens, int max
 
         case '}':
         case ']':
+            can_comment = false;
             if (tokens == NULL) {
                 break;
             }
@@ -353,6 +455,7 @@ cj5_result cj5_parse(const char* json5, uint32_t len, cj5_token* tokens, int max
 
         case '\"':
         case '\'':
+            can_comment = false;
             // JSON5: strings can start with \" or \'
             r = cj5__parse_string(&parser, json5, len, tokens, max_tokens);
             if (r.error) {
@@ -360,36 +463,55 @@ cj5_result cj5_parse(const char* json5, uint32_t len, cj5_token* tokens, int max
             }
             count++;
             if (parser.super_id != -1 && tokens) {
-                ++tokens[parser.super_id].size;
+                if (++tokens[parser.super_id].size == 1 &&
+                    tokens[parser.super_id].type == CJ5_TOKEN_STRING) {
+                    tokens[parser.super_id].key_hash = cj5__hash_fnv32(
+                        &json5[tokens[parser.super_id].start], &json5[tokens[parser.super_id].end]);
+                }
             }
             break;
 
-        case '\t':
         case '\r':
         case '\n':
+            line++;
+            can_comment = true;
+            break;
+        case '\t':
         case ' ':
             break;
 
         case ':':
+            can_comment = false;
             parser.super_id = parser.next_id - 1;
             break;
 
         case ',':
+            can_comment = false;
             if (token != NULL && parser.super_id != -1 &&
                 tokens[parser.super_id].type != CJ5_TOKEN_ARRAY &&
                 tokens[parser.super_id].type != CJ5_TOKEN_OBJECT) {
                 parser.super_id = tokens[parser.super_id].parent_id;
             }
             break;
+        case '/':
+            if (can_comment && parser.pos < len - 1 && json5[parser.pos + 1] == '/') {
+                cj5__skip_comment(&parser, json5, len);
+                break;
+            }
 
         default:
             r = cj5__parse_primitive(&parser, json5, len, tokens, max_tokens);
             if (r.error) {
                 return r;
             }
+            can_comment = false;
             count++;
             if (parser.super_id != -1 && tokens != NULL) {
-                ++tokens[parser.super_id].size;
+                if (++tokens[parser.super_id].size == 1 &&
+                    tokens[parser.super_id].type == CJ5_TOKEN_STRING) {
+                    tokens[parser.super_id].key_hash = cj5__hash_fnv32(
+                        &json5[tokens[parser.super_id].start], &json5[tokens[parser.super_id].end]);
+                }
             }
             break;
         }
@@ -408,3 +530,91 @@ cj5_result cj5_parse(const char* json5, uint32_t len, cj5_token* tokens, int max
     r.num_tokens = count;
     return r;
 }
+
+#ifdef CJ5_TEST
+#    include <stdio.h>
+#    include <stdlib.h>
+#    include <string.h>
+
+const char* g_token_types[] = { "CJ5_TOKEN_OBJECT", "CJ5_TOKEN_ARRAY", "CJ5_TOKEN_NUMBER",
+                                "CJ5_TOKEN_STRING", "CJ5_TOKEN_BOOL",  "CJ5_TOKEN_NULL" };
+
+const char* g_json =
+    "{ test: 1, test2: null, \n// this is child\n//another line\n child: {some_string: \"halo "
+    "wurst\", array: [1, 2, '3.5'], }, hex:0xcecece, }";
+int main()
+{
+    cj5_token tokens[64];
+    cj5_result r = cj5_parse(g_json, (int)strlen(g_json), tokens, 64);
+
+    puts(g_json);
+
+    if (!r.error) {
+        for (int i = 0; i < r.num_tokens; i++) {
+            char content[1024];
+            int num = tokens[i].end - tokens[i].start;
+            memcpy(content, &g_json[tokens[i].start], num);
+            content[num] = '\0';
+            assert(tokens[i].type <= CJ5_TOKEN_NULL);
+            printf("%d: { type = %s, size = %d, parent = %d, content = '%s'\n", i,
+                   g_token_types[tokens[i].type], tokens[i].size, tokens[i].parent_id, content);
+        }
+    } else {
+        puts("error");
+    }
+    return 0;
+}
+
+int cj5_seek(int parent_id, const char* key);
+int cj5_seek_recursive(int parent_id, const char* key);
+const char* cj5_get_string(int id, char* str, int max_str);
+
+double cj5_get_double(int id);
+float cj5_get_float(int id);
+int cj5_get_int(int id);
+uint32_t cj5_get_uint(int id);
+uint64_t cj5_get_uint64(int id);
+int64_t cj5_get_int64(int id);
+bool cj5_get_bool(int id);
+
+double cj5_seekget_double(int parent_id, const char* key);
+float cj5_seekget_float(int parent_id, const char* key);
+int cj5_seekget_int(int parent_id, const char* key);
+uint32_t cj5_seekget_uint(int parent_id, const char* key);
+uint64_t cj5_seekget_uint64(int parent_id, const char* key);
+int64_t cj5_seekget_int64(int parent_id, const char* key);
+bool cj5_seekget_bool(int parent_id, const char* key);
+const char* cj5_seekget_string(int parent_id, const char* key, char* str, int max_str);
+
+int cj5_seekget_array_double(int parent_id, const char* key, double* values, int max_values);
+int cj5_seekget_array_float(int parent_id, const char* key, float* values, int max_values);
+int cj5_seekget_array_int(int parent_id, const char* key, int* values, int max_values);
+int cj5_seekget_array_uint(int parent_id, const char* key, uint32_t* values, int max_values);
+int cj5_seekget_array_uint64(int parent_id, const char* key, uint64_t* values, int max_values);
+int cj5_seekget_array_int64(int parent_id, const char* key, int64_t* values, int max_values);
+int cj5_seekget_array_bool(int parent_id, const char* key, bool* values, int max_values);
+int cj5_seekget_array_string(int parent_id, const char* key, char** strs, int max_str);
+
+int cj5_get_array_count(int id);
+int cj5_get_array_elem(int id, int index);
+int cj5_get_child_count(int id);
+
+#    if 0
+void wish()
+{
+    int cj5_dom_seek(parent_id, key);
+    int cj5_dom_seek_recursive(parent_id, key);
+
+    const char* cj5_dom_get_string(id, str, max_str);
+    TYPE cj5_dom_get_TYPE(id);
+    int cj5_dom_get_array_count(id);
+    int cj5_dom_get_array_elem(id, index);
+    int cj5_dom_get_child_count(id);
+
+    int cj5_dom_seekget_array_TYPE(parent_id, key, array, max_array);
+    int cj5_dom_seekget_array_string(parent_id, key, strings, max_strings, max_string_len);
+    int cj5_dom_seekget_string(parent_id, key, str, max_str);
+    TYPE cj5_dom_seekget_type(parent_id, key);
+}
+#    endif
+#endif    // CJ5_TEST
