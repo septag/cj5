@@ -717,7 +717,7 @@ static bool cj5__toint(const char* str, int* oint)
     for (;;) {
         char c = *(str++);
         if (cj5__isnum(c)) {
-            result = result * 10 + c;
+            result = result * 10 + (int)(c - '0');
         } else {
             *oint = result * sign;
             return true;
@@ -725,7 +725,7 @@ static bool cj5__toint(const char* str, int* oint)
     }
 }
 
-static bool cj5__touint(const char* str, int* oint)
+static bool cj5__touint(const char* str, uint32_t* oint)
 {
     if (*str == '-') {
         return false;
@@ -734,7 +734,41 @@ static bool cj5__touint(const char* str, int* oint)
     for (;;) {
         char c = *(str++);
         if (cj5__isnum(c)) {
-            result = result * 10 + (uint32_t)c;
+            result = result * 10 + (uint32_t)(c - '0');
+        } else {
+            *oint = result;
+            return true;
+        }
+    }
+}
+
+static bool cj5__toint64(const char* str, int64_t* oint)
+{
+    if (*str == '-') {
+        return false;
+    }
+    int64_t result = 0;
+    for (;;) {
+        char c = *(str++);
+        if (cj5__isnum(c)) {
+            result = result * 10 + (int64_t)(c - '0');
+        } else {
+            *oint = result;
+            return true;
+        }
+    }
+}
+
+static bool cj5__touint64(const char* str, uint64_t* oint)
+{
+    if (*str == '-') {
+        return false;
+    }
+    uint64_t result = 0;
+    for (;;) {
+        char c = *(str++);
+        if (cj5__isnum(c)) {
+            result = result * 10 + (uint64_t)(c - '0');
         } else {
             *oint = result;
             return true;
