@@ -32,6 +32,10 @@ In case of errors, cj_result.error will be set to an error code. Here's a quick 
         } 
 ```
 
+**NOTE**: Unlike _jsmn_, if number of parsed tokens exceeds the provided ones, parser doesn't return immediately with an error.
+          But parses the JSON to the end, counts all needed tokens and returns with an CJ5_ERROR_OVERFLOW, so the user can 
+          choose to reparse the json with new memory requirements.
+
 ## Links
 - [jsmn](https://github.com/zserge/jsmn) Jsmn is a world fastest JSON parser/tokenizer. This is the official repo replacing the old one at Bitbucket
 
