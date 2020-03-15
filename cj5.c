@@ -20,7 +20,6 @@
 #    define CJ5_MEMCPY(_dst, _src, _n) memcpy((_dst), (_src), (_n))
 #endif
 
-
 typedef enum cj5_token_type {
     CJ5_TOKEN_OBJECT = 0,
     CJ5_TOKEN_ARRAY,
@@ -49,10 +48,16 @@ typedef struct cj5_token {
     int parent_id;
 } cj5_token;
 
+typedef enum cj5_error_code {
+    CJ5_ERROR_NONE = 0,
+    CJ5_ERROR_INVALID,
+    CJ5_ERROR_INCOMPLETE
+} cj5_error_code;
+
 typedef struct cj5_result {
-    bool error;
+    cj5_error_code error;
     int error_line;
-    int error_pos;
+    int error_col;
     int num_tokens;
     const cj5_token* tokens;
     const char* json5;
@@ -183,11 +188,12 @@ typedef struct cj5__parser {
     int pos;
     int next_id;
     int super_id;
+    int line;
 } cj5__parser;
 
-static cj5_token* cj5__alloc_token(cj5__parser* parser, cj5_token* tokens, int max_tokens)
+static inline cj5_token* cj5__alloc_token(cj5__parser* parser, cj5_token* tokens, int max_tokens)
 {
-    if (parser->next_id >= max_tokens) {
+    if (!tokens || parser->next_id >= max_tokens) {
         return NULL;
     }
 
@@ -196,20 +202,30 @@ static cj5_token* cj5__alloc_token(cj5__parser* parser, cj5_token* tokens, int m
     return token;
 }
 
-static cj5_result cj5__parse_primitive(cj5__parser* parser, const char* json5, int len,
-                                       cj5_token* tokens, int max_tokens)
+static inline void cj5__set_error(cj5_result* r, cj5_error_code code, int line, int col)
+{
+    r->error = code;
+    r->error_line = line;
+    r->error_col = col;
+}
+
+static bool cj5__parse_primitive(cj5__parser* parser, cj5_result* r, const char* json5, int len,
+                                 cj5_token* tokens, int max_tokens)
 {
     cj5_token* token;
     int start = parser->pos;
+    int line_start = start;
     bool keyname = false;
 
     for (; parser->pos < len; parser->pos++) {
         switch (json5[parser->pos]) {
+        case '\n':
+            line_start = parser->pos;
+            ++parser->line;
         case ':':
             keyname = true;
         case '\t':
         case '\r':
-        case '\n':
         case ' ':
         case ',':
         case ']':
@@ -220,23 +236,21 @@ static cj5_result cj5__parse_primitive(cj5__parser* parser, const char* json5, i
         }
 
         if (json5[parser->pos] < 32 || json5[parser->pos] >= 127) {
+            cj5__set_error(r, CJ5_ERROR_INVALID, parser->line, parser->pos - line_start);
             parser->pos = start;
-            return (cj5_result){ .error = true };    // invalid
+            return false;
         }
     }
 
+    cj5__set_error(r, CJ5_ERROR_INVALID, parser->line, parser->pos - line_start);
     parser->pos = start;
-    return (cj5_result){ .error = true };    // incomplete
+    return false;    // incomplete
 
 found:
-    if (tokens == NULL) {
-        --parser->pos;
-        return (cj5_result){ 0 };
-    }
     token = cj5__alloc_token(parser, tokens, max_tokens);
     if (token == NULL) {
-        parser->pos = start;
-        return (cj5_result){ .error = true };    // out of memory
+        --parser->pos;
+        return true;
     }
 
     cj5_token_type type;
@@ -250,14 +264,16 @@ found:
 
             if (cj5__isnum(json5[i])) {
                 if (i == start) {
+                    cj5__set_error(r, CJ5_ERROR_INVALID, parser->line, parser->pos - line_start);
                     parser->pos = start;
-                    return (cj5_result){ .error = true };    // invalid
+                    return false;
                 }
                 continue;
             }
 
+            cj5__set_error(r, CJ5_ERROR_INVALID, parser->line, parser->pos - line_start);
             parser->pos = start;
-            return (cj5_result){ .error = true };    // invalid
+            return false;
         }
 
         type = CJ5_TOKEN_STRING;
@@ -278,8 +294,10 @@ found:
                 for (int i = start; i < parser->pos; i++) {
                     if (!(cj5__isrange(json5[i], '0', '9') || cj5__isrange(json5[i], 'A', 'F') ||
                           cj5__isrange(json5[i], 'a', 'f'))) {
+                        cj5__set_error(r, CJ5_ERROR_INVALID, parser->line,
+                                       parser->pos - line_start);
                         parser->pos = start;
-                        return (cj5_result){ .error = true };    // invalid
+                        return false;
                     }
                 }
                 num_type = CJ5_TOKEN_NUMBER_HEX;
@@ -295,14 +313,19 @@ found:
                 for (int i = start_index; i < parser->pos; i++) {
                     if (json5[i] == '.') {
                         if (num_type == CJ5_TOKEN_NUMBER_FLOAT) {
-                            return (cj5_result){ .error = true };    // invalid
+                            cj5__set_error(r, CJ5_ERROR_INVALID, parser->line,
+                                           parser->pos - line_start);
+                            parser->pos = start;
+                            return false;
                         }
                         num_type = CJ5_TOKEN_NUMBER_FLOAT;
                     }
 
                     if (!cj5__isnum(json5[i])) {
+                        cj5__set_error(r, CJ5_ERROR_INVALID, parser->line,
+                                       parser->pos - line_start);
                         parser->pos = start;
-                        return (cj5_result){ .error = true };    // invalid
+                        return false;
                     }
                 }
             }
@@ -318,14 +341,15 @@ found:
     token->end = parser->pos;
     token->parent_id = parser->super_id;
     --parser->pos;
-    return (cj5_result){ 0 };
+    return true;
 }
 
-static cj5_result cj5__parse_string(cj5__parser* parser, const char* json5, int len,
-                                    cj5_token* tokens, int max_tokens)
+static bool cj5__parse_string(cj5__parser* parser, cj5_result* r, const char* json5, int len,
+                              cj5_token* tokens, int max_tokens)
 {
     cj5_token* token;
     int start = parser->pos;
+    int line_start = start;
     char str_open = json5[start];
     ++parser->pos;
 
@@ -334,17 +358,17 @@ static cj5_result cj5__parse_string(cj5__parser* parser, const char* json5, int 
 
         // end of string
         if (str_open == c) {
-            if (tokens == NULL) {
-                return (cj5_result){ 0 };
+            token = cj5__alloc_token(parser, tokens, max_tokens);
+            if (token == NULL) {
+                return true;
             }
 
-            token = cj5__alloc_token(parser, tokens, max_tokens);
             token->type = CJ5_TOKEN_STRING;
             token->start = start + 1;
             token->end = parser->pos;
             token->parent_id = parser->super_id;
 
-            return (cj5_result){ 0 };
+            return true;
         }
 
         if (c == '\\' && parser->pos + 1 < len) {
@@ -366,8 +390,10 @@ static cj5_result cj5__parse_string(cj5__parser* parser, const char* json5, int 
                     if (!((json5[parser->pos] >= 48 && json5[parser->pos] <= 57) ||   /* 0-9 */
                           (json5[parser->pos] >= 65 && json5[parser->pos] <= 70) ||   /* A-F */
                           (json5[parser->pos] >= 97 && json5[parser->pos] <= 102))) { /* a-f */
+                        cj5__set_error(r, CJ5_ERROR_INVALID, parser->line,
+                                       parser->pos - line_start);
                         parser->pos = start;
-                        return (cj5_result){ .error = true };    // invalid
+                        return false;
                     }
                     parser->pos++;
                 }
@@ -375,16 +401,18 @@ static cj5_result cj5__parse_string(cj5__parser* parser, const char* json5, int 
                 --parser->pos;
                 break;
             case '\n':
+                line_start = parser->pos;
                 break;
             default:
+                cj5__set_error(r, CJ5_ERROR_INVALID, parser->line, parser->pos - line_start);
                 parser->pos = start;
-                return (cj5_result){ .error = true };    // invalid escape
+                return false;
             }
         }
     }
 
     parser->pos = start;
-    return (cj5_result){ .error = true };    // incomplete
+    return true;
 }
 
 static void cj5__skip_comment(cj5__parser* parser, const char* json5, int len)
@@ -402,8 +430,8 @@ cj5_result cj5_parse(const char* json5, int len, cj5_token* tokens, int max_toke
     cj5_result r = { 0 };
     cj5_token* token;
     int count = parser.next_id;
-    int line = 0;
     bool can_comment = false;
+    bool token_overflow = false;
 
     for (; parser.pos < len; parser.pos++) {
         char c;
@@ -415,13 +443,10 @@ cj5_result cj5_parse(const char* json5, int len, cj5_token* tokens, int max_toke
         case '[':
             can_comment = false;
             count++;
-            if (tokens == NULL) {
-                break;
-            }
             token = cj5__alloc_token(&parser, tokens, max_tokens);
             if (token == NULL) {
-                r.error = true;
-                return r;    // out of memory
+                token_overflow = true;
+                break;
             }
 
             if (parser.super_id != -1) {
@@ -438,22 +463,23 @@ cj5_result cj5_parse(const char* json5, int len, cj5_token* tokens, int max_toke
         case '}':
         case ']':
             can_comment = false;
-            if (tokens == NULL) {
+            if (token_overflow) {
                 break;
             }
             type = (c == '}' ? CJ5_TOKEN_OBJECT : CJ5_TOKEN_ARRAY);
 
             if (parser.next_id < 1) {
-                r.error = true;
-                return r;    // invalid character
+                cj5__set_error(&r, CJ5_ERROR_INVALID, parser.line, parser.pos - parser.line);
+                return r;
             }
 
             token = &tokens[parser.next_id - 1];
             for (;;) {
                 if (token->start != -1 && token->end == -1) {
                     if (token->type != type) {
-                        r.error = true;
-                        return r;    // invalid
+                        cj5__set_error(&r, CJ5_ERROR_INVALID, parser.line,
+                                       parser.pos - parser.line);
+                        return r;
                     }
                     token->end = parser.pos + 1;
                     parser.super_id = token->parent_id;
@@ -462,8 +488,9 @@ cj5_result cj5_parse(const char* json5, int len, cj5_token* tokens, int max_toke
 
                 if (token->parent_id == -1) {
                     if (token->type != type || parser.super_id == -1) {
-                        r.error = true;
-                        return r;    // invalid
+                        cj5__set_error(&r, CJ5_ERROR_INVALID, parser.line,
+                                       parser.pos - parser.line);
+                        return r;
                     }
                     break;
                 }
@@ -476,7 +503,7 @@ cj5_result cj5_parse(const char* json5, int len, cj5_token* tokens, int max_toke
         case '\'':
             can_comment = false;
             // JSON5: strings can start with \" or \'
-            r = cj5__parse_string(&parser, json5, len, tokens, max_tokens);
+            cj5__parse_string(&parser, &r, json5, len, tokens, max_tokens);
             if (r.error) {
                 return r;
             }
@@ -492,8 +519,10 @@ cj5_result cj5_parse(const char* json5, int len, cj5_token* tokens, int max_toke
             break;
 
         case '\r':
+            can_comment = true;
+            break;
         case '\n':
-            line++;
+            ++parser.line;
             can_comment = true;
             break;
         case '\t':
@@ -520,7 +549,7 @@ cj5_result cj5_parse(const char* json5, int len, cj5_token* tokens, int max_toke
             }
 
         default:
-            r = cj5__parse_primitive(&parser, json5, len, tokens, max_tokens);
+            cj5__parse_primitive(&parser, &r, json5, len, tokens, max_tokens);
             if (r.error) {
                 return r;
             }
@@ -541,8 +570,8 @@ cj5_result cj5_parse(const char* json5, int len, cj5_token* tokens, int max_toke
         for (int i = parser.next_id - 1; i >= 0; i--) {
             // unmatched object or array ?
             if (tokens[i].start != -1 && tokens[i].end == -1) {
-                r.error = true;
-                return r;    // incomplete
+                cj5__set_error(&r, CJ5_ERROR_INCOMPLETE, parser.line, parser.pos - parser.line);
+                return r;
             }
         }
     }
@@ -703,78 +732,11 @@ static bool cj5__tofloat(const char* str, double* ofloat)
         }
     }
 
-    return sscanf(str, "%lf", ofloat) == 1;
+    *ofloat = strtod(str, NULL);
+    return true;
 }
 
-static bool cj5__toint(const char* str, int* oint)
-{
-    const int sign = (*str == '-') ? -1 : 1;
-    str += (1 - sign) / 2;
-    if (!*str) {
-        return false;
-    }
-    int result = 0;
-    for (;;) {
-        char c = *(str++);
-        if (cj5__isnum(c)) {
-            result = result * 10 + (int)(c - '0');
-        } else {
-            *oint = result * sign;
-            return true;
-        }
-    }
-}
-
-static bool cj5__touint(const char* str, uint32_t* oint)
-{
-    if (*str == '-') {
-        return false;
-    }
-    uint32_t result = 0;
-    for (;;) {
-        char c = *(str++);
-        if (cj5__isnum(c)) {
-            result = result * 10 + (uint32_t)(c - '0');
-        } else {
-            *oint = result;
-            return true;
-        }
-    }
-}
-
-static bool cj5__toint64(const char* str, int64_t* oint)
-{
-    if (*str == '-') {
-        return false;
-    }
-    int64_t result = 0;
-    for (;;) {
-        char c = *(str++);
-        if (cj5__isnum(c)) {
-            result = result * 10 + (int64_t)(c - '0');
-        } else {
-            *oint = result;
-            return true;
-        }
-    }
-}
-
-static bool cj5__touint64(const char* str, uint64_t* oint)
-{
-    if (*str == '-') {
-        return false;
-    }
-    uint64_t result = 0;
-    for (;;) {
-        char c = *(str++);
-        if (cj5__isnum(c)) {
-            result = result * 10 + (uint64_t)(c - '0');
-        } else {
-            *oint = result;
-            return true;
-        }
-    }
-}
+static bool cj5__tobool(const char* str, bool* bout) {}
 
 int cj5_seek_recursive(cj5_result* r, int parent_id, const char* key)
 {
@@ -800,10 +762,15 @@ double cj5_get_double(cj5_result* r, int id)
     char snum[32];
     double num;
     cj5__strcpy(snum, sizeof(snum), &r->json5[tok->start], tok->end - tok->start);
-    bool ok = cj5__tofloat(snum, &num);
-    CJ5_ASSERT(ok);
-    CJ5__UNUSED(ok);
+    bool valid = cj5__tofloat(snum, &num);
+    CJ5__UNUSED(valid);
+    CJ5_ASSERT(valid);
     return num;
+}
+
+float cj5_get_float(cj5_result* r, int id)
+{
+    return (float)cj5_get_double(r, id);
 }
 
 int cj5_get_int(cj5_result* r, int id)
@@ -812,12 +779,8 @@ int cj5_get_int(cj5_result* r, int id)
     const cj5_token* tok = &r->tokens[id];
     CJ5_ASSERT(tok->type == CJ5_TOKEN_NUMBER);
     char snum[32];
-    int num;
     cj5__strcpy(snum, sizeof(snum), &r->json5[tok->start], tok->end - tok->start);
-    bool ok = cj5__toint(snum, &num);
-    CJ5_ASSERT(ok);
-    CJ5__UNUSED(ok);
-    return num;
+    return (int)strtol(snum, NULL, tok->num_type != CJ5_TOKEN_NUMBER_HEX ? 10 : 16);
 }
 
 uint32_t cj5_get_uint(cj5_result* r, int id)
@@ -826,39 +789,248 @@ uint32_t cj5_get_uint(cj5_result* r, int id)
     const cj5_token* tok = &r->tokens[id];
     CJ5_ASSERT(tok->type == CJ5_TOKEN_NUMBER);
     char snum[32];
-    uint32_t num;
     cj5__strcpy(snum, sizeof(snum), &r->json5[tok->start], tok->end - tok->start);
-    bool ok = cj5__touint(snum, &num);
-    CJ5_ASSERT(ok);
-    CJ5__UNUSED(ok);
-    return num;
+    return (uint32_t)strtoul(snum, NULL, tok->num_type != CJ5_TOKEN_NUMBER_HEX ? 10 : 16);
 }
 
-uint64_t cj5_get_uint64(int id);
-int64_t cj5_get_int64(int id);
-bool cj5_get_bool(int id);
+uint64_t cj5_get_uint64(cj5_result* r, int id)
+{
+    CJ5_ASSERT(id >= 0 && id < r->num_tokens);
+    const cj5_token* tok = &r->tokens[id];
+    CJ5_ASSERT(tok->type == CJ5_TOKEN_NUMBER);
+    char snum[64];
+    cj5__strcpy(snum, sizeof(snum), &r->json5[tok->start], tok->end - tok->start);
+    return strtoull(snum, NULL, tok->num_type != CJ5_TOKEN_NUMBER_HEX ? 10 : 16);
+}
 
-double cj5_seekget_double(int parent_id, const char* key);
-float cj5_seekget_float(int parent_id, const char* key);
-int cj5_seekget_int(int parent_id, const char* key);
-uint32_t cj5_seekget_uint(int parent_id, const char* key);
-uint64_t cj5_seekget_uint64(int parent_id, const char* key);
-int64_t cj5_seekget_int64(int parent_id, const char* key);
-bool cj5_seekget_bool(int parent_id, const char* key);
-const char* cj5_seekget_string(int parent_id, const char* key, char* str, int max_str);
+int64_t cj5_get_int64(cj5_result* r, int id)
+{
+    CJ5_ASSERT(id >= 0 && id < r->num_tokens);
+    const cj5_token* tok = &r->tokens[id];
+    CJ5_ASSERT(tok->type == CJ5_TOKEN_NUMBER);
+    char snum[64];
+    cj5__strcpy(snum, sizeof(snum), &r->json5[tok->start], tok->end - tok->start);
+    return strtoll(snum, NULL, tok->num_type != CJ5_TOKEN_NUMBER_HEX ? 10 : 16);
+}
 
-int cj5_seekget_array_double(int parent_id, const char* key, double* values, int max_values);
-int cj5_seekget_array_float(int parent_id, const char* key, float* values, int max_values);
-int cj5_seekget_array_int(int parent_id, const char* key, int* values, int max_values);
-int cj5_seekget_array_uint(int parent_id, const char* key, uint32_t* values, int max_values);
-int cj5_seekget_array_uint64(int parent_id, const char* key, uint64_t* values, int max_values);
-int cj5_seekget_array_int64(int parent_id, const char* key, int64_t* values, int max_values);
-int cj5_seekget_array_bool(int parent_id, const char* key, bool* values, int max_values);
-int cj5_seekget_array_string(int parent_id, const char* key, char** strs, int max_str);
+bool cj5_get_bool(cj5_result* r, int id)
+{
+    CJ5_ASSERT(id >= 0 && id < r->num_tokens);
+    const cj5_token* tok = &r->tokens[id];
+    CJ5_ASSERT(tok->type == CJ5_TOKEN_BOOL);
+    CJ5_ASSERT((tok->end - tok->start) >= 4);
 
-int cj5_get_array_count(int id);
-int cj5_get_array_elem(int id, int index);
-int cj5_get_child_count(int id);
+    uint32_t fourcc = *((const uint32_t*)&r->json5[tok->start]);
+    if (fourcc == CJ5__TRUE_FOURCC) {
+        return true;
+    } else if (fourcc == CJ5__FALSE_FOURCC) {
+        return true;
+    } else {
+        CJ5_ASSERT(0 && "invalid bool value");
+        return false;
+    }
+}
+
+double cj5_seekget_double(cj5_result* r, int parent_id, const char* key, double def_val)
+{
+    int id = cj5_seek(r, parent_id, key);
+    return id > -1 ? cj5_get_double(r, id) : def_val;
+}
+
+float cj5_seekget_float(cj5_result* r, int parent_id, const char* key, float def_val)
+{
+    int id = cj5_seek(r, parent_id, key);
+    return id > -1 ? cj5_get_float(r, id) : def_val;
+}
+
+int cj5_seekget_int(cj5_result* r, int parent_id, const char* key, int def_val)
+{
+    int id = cj5_seek(r, parent_id, key);
+    return id > -1 ? cj5_get_int(r, id) : def_val;
+}
+
+uint32_t cj5_seekget_uint(cj5_result* r, int parent_id, const char* key, uint32_t def_val)
+{
+    int id = cj5_seek(r, parent_id, key);
+    return id > -1 ? cj5_get_uint(r, id) : def_val;
+}
+
+uint64_t cj5_seekget_uint64(cj5_result* r, int parent_id, const char* key, uint64_t def_val)
+{
+    int id = cj5_seek(r, parent_id, key);
+    return id > -1 ? cj5_get_uint64(r, id) : def_val;
+}
+
+int64_t cj5_seekget_int64(cj5_result* r, int parent_id, const char* key, int64_t def_val)
+{
+    int id = cj5_seek(r, parent_id, key);
+    return id > -1 ? cj5_get_int64(r, id) : def_val;
+}
+
+bool cj5_seekget_bool(cj5_result* r, int parent_id, const char* key, bool def_val)
+{
+    int id = cj5_seek(r, parent_id, key);
+    return id > -1 ? cj5_get_bool(r, id) : def_val;
+}
+
+const char* cj5_seekget_string(cj5_result* r, int parent_id, const char* key, char* str,
+                               int max_str, const char* def_val)
+{
+    int id = cj5_seek(r, parent_id, key);
+    return id > -1 ? cj5_get_string(r, id, str, max_str) : def_val;
+}
+
+int cj5_seekget_array_double(cj5_result* r, int parent_id, const char* key, double* values,
+                             int max_values)
+{
+    int id = cj5_seek(r, parent_id, key);
+    if (id != -1) {
+        const cj5_token* tok = &r->tokens[id];
+        CJ5_ASSERT(tok->type == CJ5_TOKEN_ARRAY);
+        int count = 0;
+        for (int i = id + 1; r->tokens[i].parent_id == id && count < max_values; i++) {
+            values[count++] = cj5_get_double(r, i);
+        }
+        return count;
+    } else {
+        return 0;
+    }
+}
+
+int cj5_seekget_array_float(cj5_result* r, int parent_id, const char* key, float* values,
+                            int max_values)
+{
+    int id = cj5_seek(r, parent_id, key);
+    if (id != -1) {
+        const cj5_token* tok = &r->tokens[id];
+        CJ5_ASSERT(tok->type == CJ5_TOKEN_ARRAY);
+        int count = 0;
+        for (int i = id + 1; r->tokens[i].parent_id == id && count < max_values; i++) {
+            values[count++] = cj5_get_float(r, i);
+        }
+        return count;
+    } else {
+        return 0;
+    }
+}
+
+int cj5_seekget_array_int(cj5_result* r, int parent_id, const char* key, int* values,
+                          int max_values)
+{
+    int id = cj5_seek(r, parent_id, key);
+    if (id != -1) {
+        const cj5_token* tok = &r->tokens[id];
+        CJ5_ASSERT(tok->type == CJ5_TOKEN_ARRAY);
+        int count = 0;
+        for (int i = id + 1; r->tokens[i].parent_id == id && count < max_values; i++) {
+            values[count++] = cj5_get_int(r, i);
+        }
+        return count;
+    } else {
+        return 0;
+    }
+}
+
+int cj5_seekget_array_uint(cj5_result* r, int parent_id, const char* key, uint32_t* values,
+                           int max_values)
+{
+    int id = cj5_seek(r, parent_id, key);
+    if (id != -1) {
+        const cj5_token* tok = &r->tokens[id];
+        CJ5_ASSERT(tok->type == CJ5_TOKEN_ARRAY);
+        int count = 0;
+        for (int i = id + 1; r->tokens[i].parent_id == id && count < max_values; i++) {
+            values[count++] = cj5_get_uint(r, i);
+        }
+        return count;
+    } else {
+        return 0;
+    }
+}
+
+int cj5_seekget_array_uint64(cj5_result* r, int parent_id, const char* key, uint64_t* values,
+                             int max_values)
+{
+    int id = cj5_seek(r, parent_id, key);
+    if (id != -1) {
+        const cj5_token* tok = &r->tokens[id];
+        CJ5_ASSERT(tok->type == CJ5_TOKEN_ARRAY);
+        int count = 0;
+        for (int i = id + 1; r->tokens[i].parent_id == id && count < max_values; i++) {
+            values[count++] = cj5_get_uint64(r, i);
+        }
+        return count;
+    } else {
+        return 0;
+    }
+}
+
+int cj5_seekget_array_int64(cj5_result* r, int parent_id, const char* key, int64_t* values,
+                            int max_values)
+{
+    int id = cj5_seek(r, parent_id, key);
+    if (id != -1) {
+        const cj5_token* tok = &r->tokens[id];
+        CJ5_ASSERT(tok->type == CJ5_TOKEN_ARRAY);
+        int count = 0;
+        for (int i = id + 1; r->tokens[i].parent_id == id && count < max_values; i++) {
+            values[count++] = cj5_get_int64(r, i);
+        }
+        return count;
+    } else {
+        return 0;
+    }
+}
+
+int cj5_seekget_array_bool(cj5_result* r, int parent_id, const char* key, bool* values,
+                           int max_values)
+{
+    int id = cj5_seek(r, parent_id, key);
+    if (id != -1) {
+        const cj5_token* tok = &r->tokens[id];
+        CJ5_ASSERT(tok->type == CJ5_TOKEN_ARRAY);
+        int count = 0;
+        for (int i = id + 1; r->tokens[i].parent_id == id && count < max_values; i++) {
+            values[count++] = cj5_get_bool(r, i);
+        }
+        return count;
+    } else {
+        return 0;
+    }
+}
+
+int cj5_seekget_array_string(cj5_result* r, int parent_id, const char* key, char** strs,
+                             int max_str, int max_values)
+{
+    int id = cj5_seek(r, parent_id, key);
+    if (id != -1) {
+        const cj5_token* tok = &r->tokens[id];
+        CJ5_ASSERT(tok->type == CJ5_TOKEN_ARRAY);
+        int count = 0;
+        for (int i = id + 1; r->tokens[i].parent_id == id && count < max_values; i++) {
+            cj5_get_string(r, i, strs[count++], max_str);
+        }
+        return count;
+    } else {
+        return 0;
+    }
+}
+
+int cj5_get_array_elem(cj5_result* r, int id, int index)
+{
+    const cj5_token* tok = &r->tokens[id];
+    CJ5_ASSERT(tok->type == CJ5_TOKEN_ARRAY);
+    CJ5_ASSERT(index < tok->size);
+    for (int i = id + 1, count = 0; count < tok->size; i++) {
+        if (r->tokens[i].parent_id == id) {
+            if (count == index) {
+                return i;
+            }
+            count++;
+        }
+    }
+    return -1;
+}
 
 #    if 0
 void wish()
