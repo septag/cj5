@@ -429,7 +429,7 @@ found:
         // detect other types, subtypes
 #if __arm__
         uint32_t fourcc_ = (uint32_t)json5[start];
-        memcpy(&fourcc_, &json5[start], 4);
+        CJ5_MEMCPY(&fourcc_, &json5[start], 4);
         uint32_t* fourcc = &fourcc_;
 #else
         uint32_t* fourcc = (uint32_t*)&json5[start];
