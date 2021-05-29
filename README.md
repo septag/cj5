@@ -1,6 +1,22 @@
 # cj5
 Very minimal single header JSON5 parser in C99, derived from [jsmn](https://github.com/zserge/jsmn)
 
+## What is json 5
+It is just a less strict standard JSON, which is easier to read and write as well ass some nice added features, for more info see [JSON5](https://json5.org/). Some Json5 features maybe incomplete or not working properly, but currently the features are tested:
+- Object keys may be an ECMAScript 5.1 IdentifierName.
+- Objects may have a single trailing comma.
+- Strings may be single quoted.
+- Strings may span multiple lines by escaping new line characters.
+- Strings may include character escapes.
+- Numbers may be hexadecimal.
+- Numbers may have a leading or trailing decimal point.
+- Numbers may be IEEE 754 positive infinity, negative infinity, and NaN.
+- Numbers may begin with an explicit plus sign.
+- Single and multi-line comments are allowed.
+- Additional white space characters are allowed.
+- Multiline comments are allowed
+
+
 ## Features
 - No memory allocations. All allocatrions are managed on the user side
 - Fast and Minimal. 
