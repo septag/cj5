@@ -591,6 +591,15 @@ static void cj5__skip_comment(cj5__parser* parser, const char* json5, int len)
     }
 }
 
+static void cj5__skip_multiline_comment(cj5__parser* parser, const char* json5, int len)
+{
+    for (; parser->pos < len; parser->pos++) {
+        if (json5[parser->pos] == '*' && parser->pos < (len - 1) && json5[parser->pos+1] == '/') {
+            return;
+        }
+    }
+}
+
 cj5_result cj5_parse(const char* json5, int len, cj5_token* tokens, int max_tokens)
 {
     cj5__parser parser;
@@ -717,9 +726,13 @@ cj5_result cj5_parse(const char* json5, int len, cj5_token* tokens, int max_toke
             }
             break;
         case '/':
-            if (can_comment && parser.pos < len - 1 && json5[parser.pos + 1] == '/') {
-                cj5__skip_comment(&parser, json5, len);
-            }
+            if (can_comment && parser.pos < len - 1) {
+                if (json5[parser.pos + 1] == '/') {
+                    cj5__skip_comment(&parser, json5, len);
+                } else if (json5[parser.pos + 1] == '*') {
+                    cj5__skip_multiline_comment(&parser, json5, len);
+                }
+            } 
             break;
 
         default:

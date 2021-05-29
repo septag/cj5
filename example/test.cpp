@@ -7,8 +7,15 @@ const char* g_token_types[] = { "CJ5_TOKEN_OBJECT", "CJ5_TOKEN_ARRAY", "CJ5_TOKE
                                 "CJ5_TOKEN_STRING", "CJ5_TOKEN_BOOL",  "CJ5_TOKEN_NULL" };
 
 const char* g_json =
-    "{ test: 1, test2: null,\n \n// this is child\n//another line\n child: {some_string: \"halo "
-    "wurst\", array: [1, 2, 3.5], }, hex:0xcecece, }";
+    "{ test: 1, test2: null,\n \n"
+    "// this is child\n//another line\n"
+    "child: {some_string: \"halo wurst\", array: [1, 2, 3.5], }, \n"
+    "/* multiline comment \n"
+    "some_other_array: [3.4, 4.1, 5.0], \n"
+    "string_val: \"gutz\", \n"
+    "*/\n"
+    "hex:0xcecece, }";
+
 int main()
 {
     cj5_token tokens[32];
