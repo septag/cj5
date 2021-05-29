@@ -36,6 +36,7 @@
 //  [x] Numbers may begin with an explicit plus sign.
 //  [x] Single and multi-line comments are allowed.
 //  [x] Additional white space characters are allowed.
+//  [x] Multiline comments
 //
 // Usage:
 //  The main function to parse json is `cj5_parse`. 
