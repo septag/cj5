@@ -53,7 +53,8 @@ In case of errors, cj_result.error will be set to an error code. Here's a quick 
           choose to reparse the json with new memory requirements.
 
 ## Links
-- [jsmn](https://github.com/zserge/jsmn) Jsmn is a world fastest JSON parser/tokenizer. This is the official repo replacing the old one at Bitbucket
+- [jsmn](https://github.com/zserge/jsmn): Jsmn is a world fastest JSON parser/tokenizer. This is the official repo replacing the old one at Bitbucket
+- [sjson](https://github.com/septag/sjson): Fast and portable C single header json Encoder/Decoder
 
 
 [License (MIT)](https://github.com/septag/cj5/blob/master/LICENSE)
