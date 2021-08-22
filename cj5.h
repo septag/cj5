@@ -431,13 +431,11 @@ found:
         type = CJ5_TOKEN_STRING;
     } else {
         // detect other types, subtypes
-#if __arm__
+        // note that we have to use memcpy here or we will get unaligned access on some hardware
         uint32_t fourcc_ = (uint32_t)json5[start];
         CJ5_MEMCPY(&fourcc_, &json5[start], 4);
         uint32_t* fourcc = &fourcc_;
-#else
-        uint32_t* fourcc = (uint32_t*)&json5[start];
-#endif
+
         if (*fourcc == CJ5__NULL_FOURCC) {
             type = CJ5_TOKEN_NULL;
         } else if (*fourcc == CJ5__TRUE_FOURCC) {
